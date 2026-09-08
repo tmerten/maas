@@ -109,7 +109,7 @@ class TestSimpleStreamsClient:
             with pytest.raises(SimpleStreamsClientException) as e:
                 await client._validate_pgp_signature("test")
         assert (
-            str(e.value) == "Either 'sqv' or 'gpg' command must be available."
+            str(e.value) == "Either 'sq' or 'gpg' command must be available."
         )
 
     async def test_validate_pgp_signature_uses_gpg_fallback(
@@ -145,52 +145,34 @@ class TestSimpleStreamsClient:
         )
         process_mock.communicate.assert_awaited_once_with(input=b"test")
 
-    async def test_validate_pgp_signature_uses_sqv(self, mocker) -> None:
+    async def test_validate_pgp_signature_uses_sq(self, mocker) -> None:
         mocker.patch("os.path.exists").return_value = True
-        mocker.patch("shutil.which").return_value = "/usr/bin/sqv"
+        mocker.patch("shutil.which").return_value = "/usr/bin/sq"
         process_mock = AsyncMock(Process)
         process_mock.returncode = 0
         process_mock.communicate.return_value = (b"", b"")
-        payload = signature = None
-
-        async def communicate():
-            nonlocal payload, signature
-            args = asyncio_create_subp_mock.call_args.args
-            with open(args[-1], encoding="utf-8") as payload_file:
-                payload = payload_file.read()
-            with open(args[-2], encoding="utf-8") as signature_file:
-                signature = signature_file.read()
-            return b"", b""
-
-        process_mock.communicate.side_effect = communicate
         asyncio_create_subp_mock = mocker.patch(
             "asyncio.create_subprocess_exec", return_value=process_mock
-        )
-        content = (
-            "-----BEGIN PGP SIGNED MESSAGE-----\n"
-            "Hash: SHA512\n"
-            "Hash: SHA256\n\n"
-            "message\n"
-            "- -dash-escaped\n"
-            "-----BEGIN PGP SIGNATURE-----\n\n"
-            "signature\n"
-            "-----END PGP SIGNATURE-----\n"
         )
 
         async with SimpleStreamsClient(
             url="http://foo.com",
             keyring_file="/path/to/keyring",
         ) as client:
-            await client._validate_pgp_signature(content)
+            await client._validate_pgp_signature(SIGNED_SAMPLE_INDEX)
 
-        args, kwargs = asyncio_create_subp_mock.call_args
-        assert args[:3] == ("sqv", "--keyring", "/path/to/keyring")
-        assert kwargs == {"stderr": asyncio.subprocess.PIPE}
-        assert payload == "message\r\n-dash-escaped"
-        assert signature == (
-            "-----BEGIN PGP SIGNATURE-----\n\n"
-            "signature\n"
-            "-----END PGP SIGNATURE-----\n"
+        asyncio_create_subp_mock.assert_called_once_with(
+            "sq",
+            "--home=none",
+            "verify",
+            "--signer-file",
+            "/path/to/keyring",
+            "-",
+            stdin=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        process_mock.communicate.assert_awaited_once_with(
+            input=SIGNED_SAMPLE_INDEX.encode()
         )
 
     async def test_validate_pgp_signature_invalid(self, mocker) -> None:
