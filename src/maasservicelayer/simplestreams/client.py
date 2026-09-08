@@ -7,6 +7,7 @@ import os
 import re
 import shutil
 import ssl
+import tempfile
 from typing import Self
 
 from aiohttp import ClientConnectorError, ClientResponseError, ClientSession
@@ -104,24 +105,83 @@ class SimpleStreamsClient:
         )
 
     async def _validate_pgp_signature(self, content: str):
-        if shutil.which("gpgv"):
-            cmd = ["gpgv", f"--keyring={self.keyring_file}", "-"]
+        if shutil.which("sqv"):
+            payload, signature = self._split_clearsigned_content(content)
+            with (
+                tempfile.NamedTemporaryFile(
+                    mode="w", encoding="utf-8"
+                ) as payload_file,
+                tempfile.NamedTemporaryFile(
+                    mode="w", encoding="utf-8"
+                ) as signature_file,
+            ):
+                payload_file.write(payload)
+                payload_file.flush()
+                signature_file.write(signature)
+                signature_file.flush()
+                cmd = [
+                    "sqv",
+                    "--keyring",
+                    f"{self.keyring_file}",
+                    signature_file.name,
+                    payload_file.name,
+                ]
+                sh = await asyncio.create_subprocess_exec(
+                    *cmd,
+                    stderr=asyncio.subprocess.PIPE,
+                )
+                _, stderr = await sh.communicate()
         elif shutil.which("gpg"):
             cmd = ["gpg", "--verify", f"--keyring={self.keyring_file}", "-"]
+            sh = await asyncio.create_subprocess_exec(
+                *cmd,
+                stdin=asyncio.subprocess.PIPE,
+                stderr=asyncio.subprocess.PIPE,
+            )
+            _, stderr = await sh.communicate(input=content.encode())
         else:
             raise SimpleStreamsClientException(
-                "Either 'gpg' or 'gpgv' command must be available."
+                "Either 'sqv' or 'gpg' command must be available."
             )
-        sh = await asyncio.create_subprocess_exec(
-            *cmd,
-            stdin=asyncio.subprocess.PIPE,
-            stderr=asyncio.subprocess.PIPE,
-        )
-        _, stderr = await sh.communicate(input=content.encode())
         if sh.returncode != 0:
             raise SimpleStreamsClientException(
                 f"Failed to verify PGP signature. Command '{' '.join(cmd)}' returned the following error: {stderr}"
             )
+
+    @staticmethod
+    def _split_clearsigned_content(content: str) -> tuple[str, str]:
+        lines = content.splitlines(keepends=True)
+        if not lines or lines[0].rstrip("\r\n") != BEGIN_PGP_MESSAGE_HEADER:
+            raise SimpleStreamsClientException(
+                "Expected a clearsigned PGP message."
+            )
+
+        try:
+            payload_start = next(
+                index + 1
+                for index, line in enumerate(lines[1:], start=1)
+                if not line.rstrip("\r\n")
+            )
+            signature_start = next(
+                index
+                for index, line in enumerate(
+                    lines[payload_start:], payload_start
+                )
+                if line.rstrip("\r\n") == BEGIN_PGP_SIGNATURE_HEADER
+            )
+        except StopIteration as e:
+            raise SimpleStreamsClientException(
+                "Expected a clearsigned PGP message."
+            ) from e
+
+        payload_lines = lines[payload_start:signature_start]
+        if payload_lines and payload_lines[-1].endswith(("\r\n", "\n", "\r")):
+            payload_lines.pop()
+        payload = "\r\n".join(
+            line.rstrip("\r\n").rstrip(" \t").removeprefix("- ")
+            for line in payload_lines
+        )
+        return payload, "".join(lines[signature_start:])
 
     async def _parse_response(self, content: str) -> dict:
         """Parse and verify the response from the mirror.
