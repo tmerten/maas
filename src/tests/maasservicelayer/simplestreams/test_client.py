@@ -175,12 +175,28 @@ class TestSimpleStreamsClient:
             input=SIGNED_SAMPLE_INDEX.encode()
         )
 
-    async def test_validate_pgp_signature_invalid(self, mocker) -> None:
+    @pytest.mark.parametrize(
+        "which_output, expected_cmd, err_msg",
+        [
+            (
+                "/usr/bin/sq",
+                "sq --home=none verify --signer-file /path/to/keyring -",
+                b"sq: signature verification failed",
+            ),
+            (
+                "/usr/bin/gpg",
+                "gpg --verify --keyring=/path/to/keyring -",
+                b"gpg: Can't check signature: No public key",
+            ),
+        ],
+    )
+    async def test_validate_pgp_signature_invalid(
+        self, mocker, which_output: str, expected_cmd: str, err_msg: bytes
+    ) -> None:
         mocker.patch("os.path.exists").return_value = True
-        mocker.patch("shutil.which").return_value = "/usr/bin/gpg"
+        mocker.patch("shutil.which").return_value = which_output
         process_mock = AsyncMock(Process)
         process_mock.returncode = 1
-        err_msg = b"gpg: Can't check signature: No public key"
         process_mock.communicate.return_value = (b"", err_msg)
 
         asyncio_create_subp_mock = mocker.patch(
@@ -198,7 +214,7 @@ class TestSimpleStreamsClient:
         assert (
             str(e.value)
             == "Failed to verify PGP signature. Command "
-            "'gpg --verify --keyring=/path/to/keyring -' returned the "
+            f"'{expected_cmd}' returned the "
             f"following error: {err_msg}"
         )
 
