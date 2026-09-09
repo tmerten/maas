@@ -104,13 +104,20 @@ class SimpleStreamsClient:
         )
 
     async def _validate_pgp_signature(self, content: str):
-        if shutil.which("gpgv"):
-            cmd = ["gpgv", f"--keyring={self.keyring_file}", "-"]
+        if shutil.which("sq"):
+            cmd = [
+                "sq",
+                "--home=none",
+                "verify",
+                "--signer-file",
+                f"{self.keyring_file}",
+                "-",
+            ]
         elif shutil.which("gpg"):
             cmd = ["gpg", "--verify", f"--keyring={self.keyring_file}", "-"]
         else:
             raise SimpleStreamsClientException(
-                "Either 'gpg' or 'gpgv' command must be available."
+                "Either 'sq' or 'gpg' command must be available."
             )
         sh = await asyncio.create_subprocess_exec(
             *cmd,

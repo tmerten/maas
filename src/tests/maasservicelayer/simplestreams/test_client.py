@@ -97,7 +97,7 @@ class TestSimpleStreamsClient:
         await c2.close_session()
         await c3.close_session()
 
-    async def test_validate_pgp_signature_no_gpg_executable_found(
+    async def test_validate_pgp_signature_no_executable_found(
         self, mocker
     ) -> None:
         mocker.patch("os.path.exists").return_value = True
@@ -109,31 +109,18 @@ class TestSimpleStreamsClient:
             with pytest.raises(SimpleStreamsClientException) as e:
                 await client._validate_pgp_signature("test")
         assert (
-            str(e.value) == "Either 'gpg' or 'gpgv' command must be available."
+            str(e.value) == "Either 'sq' or 'gpg' command must be available."
         )
 
-    @pytest.mark.parametrize(
-        "which_output, expected_cmd",
-        [
-            (
-                ["/usr/bin/gpgv", None],
-                ["gpgv", "--keyring=/path/to/keyring", "-"],
-            ),
-            (
-                [None, "/usr/bin/gpg"],
-                ["gpg", "--verify", "--keyring=/path/to/keyring", "-"],
-            ),
-        ],
-    )
-    async def test_validate_pgp_signature(
-        self, mocker, which_output: list, expected_cmd: list[str]
+    async def test_validate_pgp_signature_uses_gpg_fallback(
+        self, mocker
     ) -> None:
         mocker.patch("os.path.exists").return_value = True
-        mocker.patch("shutil.which").side_effect = which_output
+        mocker.patch("shutil.which").side_effect = [None, "/usr/bin/gpg"]
         process_mock = AsyncMock(Process)
         process_mock.returncode = 0
         process_mock.communicate.return_value = (
-            b'gpgv: Good signature from "Jane Doe <jane@doe.com>"',
+            b'gpg: Good signature from "Jane Doe <jane@doe.com>"',
             b"",
         )
 
@@ -149,17 +136,67 @@ class TestSimpleStreamsClient:
             await client._validate_pgp_signature("test")
 
         asyncio_create_subp_mock.assert_called_once_with(
-            *expected_cmd,
+            "gpg",
+            "--verify",
+            "--keyring=/path/to/keyring",
+            "-",
             stdin=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.PIPE,
         )
+        process_mock.communicate.assert_awaited_once_with(input=b"test")
 
-    async def test_validate_pgp_signature_invalid(self, mocker) -> None:
+    async def test_validate_pgp_signature_uses_sq(self, mocker) -> None:
         mocker.patch("os.path.exists").return_value = True
-        mocker.patch("shutil.which").return_value = "/usr/bin/gpgv"
+        mocker.patch("shutil.which").return_value = "/usr/bin/sq"
+        process_mock = AsyncMock(Process)
+        process_mock.returncode = 0
+        process_mock.communicate.return_value = (b"", b"")
+        asyncio_create_subp_mock = mocker.patch(
+            "asyncio.create_subprocess_exec", return_value=process_mock
+        )
+
+        async with SimpleStreamsClient(
+            url="http://foo.com",
+            keyring_file="/path/to/keyring",
+        ) as client:
+            await client._validate_pgp_signature(SIGNED_SAMPLE_INDEX)
+
+        asyncio_create_subp_mock.assert_called_once_with(
+            "sq",
+            "--home=none",
+            "verify",
+            "--signer-file",
+            "/path/to/keyring",
+            "-",
+            stdin=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.PIPE,
+        )
+        process_mock.communicate.assert_awaited_once_with(
+            input=SIGNED_SAMPLE_INDEX.encode()
+        )
+
+    @pytest.mark.parametrize(
+        "which_output, expected_cmd, err_msg",
+        [
+            (
+                "/usr/bin/sq",
+                "sq --home=none verify --signer-file /path/to/keyring -",
+                b"sq: signature verification failed",
+            ),
+            (
+                "/usr/bin/gpg",
+                "gpg --verify --keyring=/path/to/keyring -",
+                b"gpg: Can't check signature: No public key",
+            ),
+        ],
+    )
+    async def test_validate_pgp_signature_invalid(
+        self, mocker, which_output: str, expected_cmd: str, err_msg: bytes
+    ) -> None:
+        mocker.patch("os.path.exists").return_value = True
+        mocker.patch("shutil.which").return_value = which_output
         process_mock = AsyncMock(Process)
         process_mock.returncode = 1
-        err_msg = b"gpgv: Can't check signature: No public key"
         process_mock.communicate.return_value = (b"", err_msg)
 
         asyncio_create_subp_mock = mocker.patch(
@@ -176,7 +213,9 @@ class TestSimpleStreamsClient:
 
         assert (
             str(e.value)
-            == f"Failed to verify PGP signature. Command 'gpgv --keyring=/path/to/keyring -' returned the following error: {err_msg}"
+            == "Failed to verify PGP signature. Command "
+            f"'{expected_cmd}' returned the "
+            f"following error: {err_msg}"
         )
 
     @pytest.mark.parametrize(
